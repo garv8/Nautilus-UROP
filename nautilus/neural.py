@@ -1,187 +1,141 @@
 """Module implementing neural network emulators."""
 
 import numpy as np
-import warnings
-from functools import partial
-from sklearn.neural_network import MLPRegressor
 from threadpoolctl import threadpool_limits
-
-
-@threadpool_limits.wrap(limits=1)
-def train_network(x, y, neural_network_kwargs, random_state):
-    """Train a network.
-
-    Parameters
-    ----------
-    x : numpy.ndarray
-        Input coordinates.
-    y : numpy.ndarray
-        Target values.
-    neural_network_kwargs : dict
-        Keyword arguments passed to the constructor of MLPRegressor.
-    random_state : int
-        Determines random number generation.
-
-    Returns
-    -------
-    network : MLPRegressor
-        The trained network.
-
-    """
-    return MLPRegressor(
-        random_state=random_state, **neural_network_kwargs).fit(x, y)
+from sklearn.neural_network import MLPRegressor
+import random
+from scipy.special import gamma
+from scipy.stats import norm, multivariate_normal
+import logging
+import tensorflow as tf
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+tf.get_logger().setLevel('ERROR')
+from tensorflow import keras
+import time
+import imblearn
+import matplotlib
+from matplotlib import pyplot as plt
+from imblearn.under_sampling import RandomUnderSampler
+import sklearn
+from sklearn import metrics
+from sklearn.utils import class_weight
+#x=np.random.uniform(low=0, high=1, siz
 
 
 class NeuralNetworkEmulator():
     """Likelihood neural network emulator.
-
     Attributes
     ----------
-    mean : numpy.ndarray
-        Mean of input coordinates used for normalizing coordinates.
-    scale : numpy.ndarray
-        Standard deviation of input coordinates used for normalizing
-        coordinates.
     network : sklearn.neural_network.MLPRegressor
         Artifical neural network used for emulation.
-
+    neural_network_thread_limit : int
+        Maximum number of threads used by `sklearn`. If None, no limits
+        are applied.
     """
 
     @classmethod
-    def train(cls, x, y, n_networks=4, neural_network_kwargs={}, pool=None):
+    def train(cls, x, y, neural_network_kwargs={},
+              neural_network_thread_limit=1):
         """Initialize and train the likelihood neural network emulator.
-
         Parameters
         ----------
         x : numpy.ndarray
-            Input coordinates.
+            Normalized coordinates of the training points.
         y : numpy.ndarray
-            Target values.
-        n_networks : int, optional
-            Number of networks used in the emulator. Default is 4.
+            Normalized likelihood value of the training points.
         neural_network_kwargs : dict, optional
-            Non-default keyword arguments passed to the constructor of
-            MLPRegressor.
-        pool : multiprocessing.Pool, optional
-            Pool used for parallel processing.
-
+            Keyword arguments passed to the constructor of
+            `sklearn.neural_network.MLPRegressor`. By default, no keyword
+            arguments are passed to the constructor.
+        neural_network_thread_limit : int or None, optional
+            Maximum number of threads used by `sklearn`. If None, no limits
+            are applied. Default is 1.
         Returns
         -------
         emulator : NeuralNetworkEmulator
             The likelihood neural network emulator.
-
         """
         emulator = cls()
+        initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.03, seed=None)
 
-        emulator.mean = np.mean(x, axis=0)
-        emulator.scale = np.std(x, axis=0)
-
-        default_neural_network_kwargs = dict(
-            hidden_layer_sizes=(100, 50, 20), alpha=0, learning_rate_init=1e-2,
-            max_iter=10000, tol=0, n_iter_no_change=10)
-        default_neural_network_kwargs.update(neural_network_kwargs)
-        neural_network_kwargs = default_neural_network_kwargs
-
-        if 'random_state' in neural_network_kwargs:
-            warnings.warn("The 'random_state' keyword argument passed to the" +
-                          " neural network is ignored.", Warning, stacklevel=2)
-            del neural_network_kwargs['random_state']
-
-        f = partial(train_network, (x - emulator.mean) / emulator.scale, y,
-                    neural_network_kwargs)
-
-        if pool is None:
-            emulator.neural_networks = list(map(f, range(n_networks)))
-        else:
-            emulator.neural_networks = list(pool.map(f, range(n_networks)))
+        emulator.neural_network = tf.keras.models.Sequential([tf.keras.layers.Dense(800, kernel_initializer=initializer, activation='gelu'), tf.keras.layers.Dropout(0.1), tf.keras.layers.Dense(400, kernel_initializer=initializer, activation='gelu'), tf.keras.layers.Dropout(0.1), tf.keras.layers.Dense(60, kernel_initializer=initializer, activation='gelu'), tf.keras.layers.Dense(1, kernel_initializer=initializer, activation='gelu')])
+        msle = tf.keras.losses.MeanSquaredLogarithmicError()
+        o = tf.keras.optimizers.experimental.Nadam()
+        emulator.neural_network.compile(loss=msle, optimizer=o, metrics=[msle])
+        emulator.neural_network_thread_limit = neural_network_thread_limit
+        with threadpool_limits(limits=emulator.neural_network_thread_limit):
+            emulator.neural_network.fit(x, y, epochs=120, verbose=0)
 
         return emulator
 
     def predict(self, x):
         """Calculate the emulator likelihood prediction for a group of points.
-
         Parameters
         ----------
         x : numpy.ndarray
             Normalized coordinates of the training points.
-
         Returns
         -------
         y_emu : numpy.ndarray
             Emulated normalized likelihood value of the training points.
-
         """
-        return np.mean(
-            [network.predict((x - self.mean) / self.scale) for network in
-             self.neural_networks], axis=0)
+        with threadpool_limits(limits=self.neural_network_thread_limit):
+            return self.neural_network.predict(x).flatten()
 
     def write(self, group):
         """Write the emulator to an HDF5 group.
-
         Parameters
         ----------
         group : h5py.Group
             HDF5 group to write to.
-
         """
-        group.attrs['n_networks'] = len(self.neural_networks)
+        group.attrs['neural_network_thread_limit'] =\
+            self.neural_network_thread_limit
 
-        for i, network in enumerate(self.neural_networks):
+        for key in self.neural_network.__dict__:
 
-            for key in network.__dict__:
-                if key in ['coefs_', 'intercepts_']:
-                    continue
-                try:
-                    group.attrs[key + '_{}'.format(i)] = getattr(network, key)
-                except (TypeError, ValueError):
-                    pass
+            if key in ['coefs_', 'intercepts_']:
+                continue
 
-            for k in range(network.n_layers_ - 1):
-                group.create_dataset('coefs_{}_{}'.format(k, i),
-                                     data=network.coefs_[k])
-                group.create_dataset('intercepts_{}_{}'.format(k, i),
-                                     data=network.intercepts_[k])
+            try:
+                group.attrs[key] = getattr(self.neural_network, key)
+            except TypeError:
+                pass
 
-        group.create_dataset('mean', data=self.mean)
-        group.create_dataset('scale', data=self.scale)
+        for i in range(self.neural_network.n_layers_ - 1):
+            group.create_dataset('coefs_{}'.format(i),
+                                 data=self.neural_network.coefs_[i])
+            group.create_dataset('intercepts_{}'.format(i),
+                                 data=self.neural_network.intercepts_[i])
 
     @classmethod
     def read(cls, group):
         """Read the emulator from an HDF5 group.
-
         Parameters
         ----------
         group : h5py.Group
             HDF5 group to write to.
-
         Returns
         -------
         emulator : NeuralNetworkEmulator
             The likelihood neural network emulator.
-
         """
         emulator = cls()
 
-        emulator.mean = np.array(group['mean'])
-        emulator.scale = np.array(group['scale'])
+        emulator.neural_network_thread_limit =\
+            group.attrs['neural_network_thread_limit'].item()
 
-        emulator.neural_networks = []
+        emulator.neural_network = MLPRegressor()
 
-        for i in range(group.attrs['n_networks']):
+        for key in group.attrs:
+            if key != 'neural_network_thread_limit':
+                setattr(emulator.neural_network, key, group.attrs[key])
 
-            network = MLPRegressor()
-
-            for key in group.attrs:
-                if key.rsplit('_', 1)[1] == '{}'.format(i):
-                    setattr(network, key.rsplit('_', 1)[0], group.attrs[key])
-
-            network.coefs_ = [
-                np.array(group['coefs_{}_{}'.format(k, i)]) for k in
-                range(network.n_layers_ - 1)]
-            network.intercepts_ = [
-                np.array(group['intercepts_{}_{}'.format(k, i)]) for k in
-                range(network.n_layers_ - 1)]
-
-            emulator.neural_networks.append(network)
+        emulator.neural_network.coefs_ = [
+            np.array(group['coefs_{}'.format(i)]) for i in
+            range(emulator.neural_network.n_layers_ - 1)]
+        emulator.neural_network.intercepts_ = [
+            np.array(group['intercepts_{}'.format(i)]) for i in
+            range(emulator.neural_network.n_layers_ - 1)]
 
         return emulator
