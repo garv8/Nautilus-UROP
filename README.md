@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/github/license/johannesulf/nautilus)](https://raw.githubusercontent.com/johannesulf/nautilus/main/LICENSE)
 ![Language: Python](https://img.shields.io/github/languages/top/johannesulf/nautilus)
 
-Nautilus is an MIT-licensed pure-Python package for Bayesian posterior and evidence estimation. It utilizes importance sampling and efficient space exploration using neural networks. Compared to traditional MCMC and Nested Sampling codes, it often needs fewer likelihood calls and produces much larger posterior samples. Additionally, nautilus is highly accurate and produces Bayesian evidence estimates with percent precision.
+Nautilus is an MIT-licensed pure-Python package for Bayesian posterior and evidence estimation. It utilizes importance sampling and efficient space exploration using neural networks. Compared to traditional MCMC and Nested Sampling codes, it often needs fewer likelihood calls and produces much larger posterior samples. Additionally, nautilus is highly accurate and produces Bayesian evidence estimates with percent precision. I collaborated with Dr. Lange on this project in an attempt to improve the accuracy of the neural netwrok by leveraging TensorFlow. This version of the project has my TensorFlow code in nautilus/neural.py. This version had ~10% increase in accuracy when tested on the loggamma problem with 15+ dimensions.
 
 ## Example
 
